@@ -52,7 +52,7 @@ if __name__ == '__main__':
     # WeCar의 카메라 이미지를 Bird Eye View 이미지로 변환하기 위한 클래스를 선언
     bev_trans = BEVTransform(params_cam=params_cam)
     # BEV로 변환된 이미지에서 추출한 포인트를 기반으로 RANSAC을 이용하여 차선을 예측하는 클래스를 선언
-    pts_learner = CURVEFit(order=3)
+    pts_learner = CURVEFit(order=3, init_width=0.5)
 
     lane_detector = LINEDetector()
 
@@ -64,8 +64,9 @@ if __name__ == '__main__':
 
             # 카메라 이미지를 BEV이미지로 변환
             img_bev = bev_trans.warp_bev_img(lane_detector.img_lane)
-            # 카메라 이미지에서 차선에 해당하는 포인트들을 추출
+            # 이진화된 카메라 이미지를 전체에서(위에서) 0.5(전체=1)만큼 자르고 나머지에서 차선에 해당하는 포인트들을 추출
             lane_pts = bev_trans.recon_lane_pts(lane_detector.img_lane)
+            # print(lane_pts[1])
 
             # 추출한 포인트를 기반으로 차선을 예측
             x_pred, y_pred_l, y_pred_r = pts_learner.fit_curve(lane_pts)
@@ -85,7 +86,7 @@ if __name__ == '__main__':
                                                   xyr[:, 1].astype(np.int32),
                                                   )
             
-            cv2.imshow('BEV Window', img_bev_line)
+            cv2.imshow("BEV", img_bev_line)
             cv2.waitKey(1)
 
             rate.sleep()

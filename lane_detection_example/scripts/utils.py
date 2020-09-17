@@ -130,8 +130,7 @@ class BEVTransform:
         self.build_tf(params_cam)
 
     def calc_Xv_Yu(self, U, V):
-        Xv = self.h*(np.tan(self.theta)*(1-2*(V-1)/(self.m-1))*np.tan(self.alpha_r)-1)/\
-            (-np.tan(self.theta)+(1-2*(V-1)/(self.m-1))*np.tan(self.alpha_r))
+        Xv = self.h*(np.tan(self.theta)*(1-2*(V-1)/(self.m-1))*np.tan(self.alpha_r)-1)/(-np.tan(self.theta)+(1-2*(V-1)/(self.m-1))*np.tan(self.alpha_r))
         Yu = (1-2*(U-1)/(self.n-1))*Xv*np.tan(self.alpha_c)
 
         return Xv, Yu
@@ -173,11 +172,13 @@ class BEVTransform:
         return img_warp
 
     def recon_lane_pts(self, img):
-        img[:int(0.5*self.height), :] = 0
+        # cut_size만큼 위에서 이미지를 잘라서 포인트를 추출
+        cut_size = 0.5
+        img[:int(cut_size*self.height), :] = 0
 
         if cv2.countNonZero(img) != 0:
             UV_mark = cv2.findNonZero(img).reshape([-1, 2])
-
+            # U는 카메라에서 가로(x) V는 카메라에서 세로(y)
             U, V = UV_mark[:, 0].reshape([-1, 1]), UV_mark[:, 1].reshape([-1, 1])
 
             Xv, Yu = self.calc_Xv_Yu(U, V)
@@ -188,7 +189,7 @@ class BEVTransform:
                 np.zeros_like(Yu.reshape([1, -1])),
                 np.ones_like(Yu.reshape([1, -1]))
             ], axis=0)
-
+            # xyz_g[0]: 추출한 포인터의 x좌표, xyz_g[1]: 추출한 포인터의 y좌표
             xyz_g = xyz_g[:, xyz_g[0, :] >= 0]
         else:
             xyz_g = np.zeros((4, 10))
@@ -242,18 +243,18 @@ class BEVTransform:
 
 class CURVEFit:
 
-    def __init__(self, order):
+    def __init__(self, order, init_width=0.5):
         # order: 다항식 차수, 
-        # land_width: 좌우 차선간의 폭, 
+        # init_width: 초기 좌우 차선간의 폭, 
         # y_margin: 차선 픽셀 좌표를 모을 마진: +,- 0.2, 
         # dx: Regresss가 되면 0.1간격으로 차선을 예측, 
         # min_pts: 모으는 구간당 최소 픽셀 수
         self.order = order
-        self.lane_width = 0.5
         self.y_margin = 0.2
         self.x_range = 3
         self.dx = 0.1
-        self.min_pts = 50
+        self.min_pts = 50        
+        self.init_width = init_width
 
         self.lane_path = Path()
 
@@ -274,6 +275,7 @@ class CURVEFit:
         self._init_model()
 
     def _init_model(self):
+        self.lane_width = self.init_width
 
         X = np.stack([np.arange(0, 2, 0.02)**i for i in reversed(range(1, self.order+1))]).T
         y_l = 0.5*self.lane_width*np.ones_like(np.arange(0, 2, 0.02))
@@ -283,7 +285,8 @@ class CURVEFit:
         self.ransac_right.fit(X, y_r)
 
     def preprocess_pts(self, lane_pts):
-
+        # recon_lane_pts에서 추출한 포인트들(차선인지 구분 안한 포인트들)을 일정 거리만큼 간격을 주고 랜덤으로 포인트를 선택하여
+        # x_left, x_right, y_left, y_right로 변환
         idx_list = []
         
         for d in np.arange(0, self.x_range, self.dx):
@@ -315,9 +318,16 @@ class CURVEFit:
         
         x_left, y_left, x_right, y_right = self.preprocess_pts(lane_pts)
 
+        # y포인트들(여기서 y값은 가로범위)이 갯수가 0 일경우 초기화
         if len(y_left)==0 or len(y_right)==0:
+            print('y point does not exist')
             self._init_model()
             x_left, y_left, x_right, y_right = self.preprocess_pts(lane_pts)
+
+        # 차선 폭이 너무 졻게 계산되면 자동으로 초기화
+        if self.lane_width < 0.01:
+            print("Too Short lane width")
+            self._init_model()
         
         X_left = np.stack([x_left**i for i in reversed(range(1, self.order+1))]).T
         X_right = np.stack([x_right**i for i in reversed(range(1, self.order+1))]).T
@@ -342,6 +352,15 @@ class CURVEFit:
         
         if y_right.shape[0]<self.ransac_right.min_samples:
             y_pred_r = y_pred_l - self.lane_width
+
+        # 예측한 각 y값들의 거리 평균이 0.1보다 작을경우 차선을 강제로 분리
+        if np.mean(np.abs(y_pred_l - y_pred_r)) <= 0.1:
+            # 둘다 0보다 큰 값이면 차선이 왼쪽에 있다는 것
+            if y_pred_l[5] < 0 and y_pred_r < 0:
+                y_pred_l = y_pred_l + self.init_width
+            # 둘다 0보다 작은 값이면 차선이 오른쪽에 있다는 것
+            if y_pred_l[5] > 0 and y_pred_r > 0:
+                y_pred_r = y_pred_r - self.init_width
 
         return x_pred, y_pred_l, y_pred_r
 
@@ -369,10 +388,10 @@ def draw_lane_img(img, leftx, lefty, rightx, righty):
     point_np = cv2.cvtColor(np.copy(img), cv2.COLOR_GRAY2BGR)
 
     for ctr in zip(leftx, lefty):
-        point_np = cv2.circle(point_np, ctr, 2, (255,0,0), -1)
+        point_np = cv2.circle(point_np, ctr, 5, (255,0,0), -1)
 
     for ctr in zip(rightx, righty):
-        point_np = cv2.circle(point_np, ctr, 2, (0,0,255), -1)
+        point_np = cv2.circle(point_np, ctr, 5, (0,0,255), -1)
 
     return point_np
 

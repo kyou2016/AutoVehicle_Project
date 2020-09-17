@@ -42,7 +42,7 @@ if __name__ == '__main__':
     ctrl_wecar = Controller()
 
     ctrl_onlane = purePursuit(look_forward_distance=0.85)
-    ctrl_speed = PID_longitudinal(speed_max=2000)
+    ctrl_speed = PID_longitudinal(speed_max=2500)
 
     rate = rospy.Rate(20)
 
