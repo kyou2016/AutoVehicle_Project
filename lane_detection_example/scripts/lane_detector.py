@@ -6,6 +6,7 @@ import cv2
 import os, rospkg
 import numpy as np
 import json
+import copy
 
 from sensor_msgs.msg import CompressedImage
 from cv_bridge import CvBridgeError
@@ -50,7 +51,7 @@ if __name__ == '__main__':
     rospy.init_node('Line_Detector', anonymous=True)
 
     # WeCar의 카메라 이미지를 Bird Eye View 이미지로 변환하기 위한 클래스를 선언
-    bev_trans = BEVTransform(params_cam=params_cam)
+    bev_trans = BEVTransform(params_cam=params_cam,cut_size=0.55)
     # BEV로 변환된 이미지에서 추출한 포인트를 기반으로 RANSAC을 이용하여 차선을 예측하는 클래스를 선언
     pts_learner = CURVEFit(order=3, init_width=0.5)
 
@@ -61,11 +62,13 @@ if __name__ == '__main__':
     while not rospy.is_shutdown():
 
         if lane_detector.img_lane is not None:
-
+            img_lane_pts = copy.deepcopy(lane_detector.img_lane)
+            img_bev = copy.deepcopy(lane_detector.img_lane)
+            # lane_detector.img_lane[:int(0.6*640), :] = 0
             # 카메라 이미지를 BEV이미지로 변환
-            img_bev = bev_trans.warp_bev_img(lane_detector.img_lane)
+            img_bev = bev_trans.warp_bev_img(img_bev)
             # 이진화된 카메라 이미지를 전체에서(위에서) 0.5(전체=1)만큼 자르고 나머지에서 차선에 해당하는 포인트들을 추출
-            lane_pts = bev_trans.recon_lane_pts(lane_detector.img_lane)
+            lane_pts = bev_trans.recon_lane_pts(img_lane_pts)
             # print(lane_pts[1])
 
             # 추출한 포인트를 기반으로 차선을 예측
@@ -80,13 +83,13 @@ if __name__ == '__main__':
             xyl, xyr = bev_trans.project_lane2img(x_pred, y_pred_l, y_pred_r)
 
             # 예측한 차선 포인트들을 BEV이미지에 넣기
-            img_bev_line = draw_lane_img(img_bev, xyl[:, 0].astype(np.int32),   # 예측한 차선 포인트들을 BEV이미지에 출력
+            img_bev_lane = draw_lane_img(img_bev, xyl[:, 0].astype(np.int32),   # 예측한 차선 포인트들을 BEV이미지에 출력
                                                   xyl[:, 1].astype(np.int32),
                                                   xyr[:, 0].astype(np.int32),
                                                   xyr[:, 1].astype(np.int32),
                                                   )
             
-            cv2.imshow("BEV", img_bev_line)
+            cv2.imshow("BEV", img_bev_lane)
             cv2.waitKey(1)
 
             rate.sleep()
