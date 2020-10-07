@@ -16,8 +16,7 @@ from utils import BEVTransform, CURVEFit, draw_lane_img
 class LINEDetector:
 
     def __init__(self):
-        # self.image_sub = rospy.Subscriber('/image_jpeg/compressed', CompressedImage, self.image_Callback)
-        self.image_sub = rospy.Subscriber('/usb_cam/image_raw/compressed', CompressedImage, self.image_Callback)
+        self.image_sub = rospy.Subscriber('/image_jpeg/compressed', CompressedImage, self.image_Callback)
         self.img_lane = None
 
     def image_Callback(self, msg):

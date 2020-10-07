@@ -16,8 +16,7 @@ from utils import BEVTransform, CURVEFit, draw_lane_img
 class LINEDetector:
 
     def __init__(self):
-        # self.image_sub = rospy.Subscriber('/image_jpeg/compressed', CompressedImage, self.image_Callback)
-        self.image_sub = rospy.Subscriber('/usb_cam/image_raw/compressed', CompressedImage, self.image_Callback)
+        self.image_sub = rospy.Subscriber('/image_jpeg/compressed', CompressedImage, self.image_Callback)
         self.img_lane = None
 
     def image_Callback(self, msg):
@@ -72,6 +71,7 @@ if __name__ == '__main__':
             lane_pts = bev_trans.recon_lane_pts(img_lane_pts)
             # print(lane_pts[1])
 
+            pts_learner.init_setting(lane_pts)
             # 추출한 포인트를 기반으로 차선을 예측
             x_pred, y_pred_l, y_pred_r = pts_learner.fit_curve(lane_pts)
 

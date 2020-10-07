@@ -5,6 +5,7 @@ import rospy
 import numpy as np
 import cv2
 import math
+import copy as cp
 
 from std_msgs.msg import Float64, String
 from nav_msgs.msg import Path
@@ -82,8 +83,8 @@ def projectionMtx(params_cam):
         fc_x = params_cam["HEIGHT"]/(2*np.tan(np.deg2rad(params_cam["FOV"]/2)))
         fc_y = params_cam["HEIGHT"]/(2*np.tan(np.deg2rad(params_cam["FOV"]/2)))
     else:
-        fc_x = params_cam["WIDTH"]/2*(2*np.tan(np.deg2rad(params_cam["FOV"]/2)))
-        fc_y = params_cam["WIDTH"]/2*(2*np.tan(np.deg2rad(params_cam["FOV"]/2)))
+        fc_x = params_cam["WIDTH"]/2(2*np.tan(np.deg2rad(params_cam["FOV"]/2)))
+        fc_y = params_cam["WIDTH"]/2(2*np.tan(np.deg2rad(params_cam["FOV"]/2)))
 
     cx = params_cam['WIDTH']/2
     cy = params_cam["HEIGHT"]/2
@@ -95,9 +96,10 @@ def projectionMtx(params_cam):
 
 class BEVTransform:
 
-    def __init__(self, params_cam, xb=1.0, zb=1.0):
+    def __init__(self, params_cam, xb=1.0, zb=1.0, cut_size=0.5):
         self.xb = xb
         self.zb = zb
+        self.cut_size = cut_size
 
         self.theta = np.deg2rad(params_cam["PITCH"])
         self.width = params_cam["WIDTH"]
@@ -136,7 +138,7 @@ class BEVTransform:
         return Xv, Yu
 
     def build_tf(self, params_cam):
-        v = np.array([params_cam["HEIGHT"]*0.5, params_cam["HEIGHT"]]).astype(np.float32)
+        v = np.array([params_cam["HEIGHT"]*self.cut_size, params_cam["HEIGHT"]]).astype(np.float32)
         u = np.array([0, params_cam["WIDTH"]]).astype(np.float32)
 
         U, V = np.meshgrid(u, v)
@@ -173,8 +175,7 @@ class BEVTransform:
 
     def recon_lane_pts(self, img):
         # cut_size만큼 위에서 이미지를 잘라서 포인트를 추출
-        cut_size = 0.5
-        img[:int(cut_size*self.height), :] = 0
+        img[:int(self.cut_size*self.height), :] = 0
 
         if cv2.countNonZero(img) != 0:
             UV_mark = cv2.findNonZero(img).reshape([-1, 2])
@@ -272,8 +273,6 @@ class CURVEFit:
 
         self.path_pub = rospy.Publisher('/lane_path', Path, queue_size=1)
 
-        self._init_model()
-
     def _init_model(self):
         self.lane_width = self.init_width
 
@@ -284,7 +283,7 @@ class CURVEFit:
         self.ransac_left.fit(X, y_l)
         self.ransac_right.fit(X, y_r)
 
-    def preprocess_pts(self, lane_pts):
+    def _init_preprocess_pts(self, lane_pts):
         # recon_lane_pts에서 추출한 포인트들(차선인지 구분 안한 포인트들)을 일정 거리만큼 간격을 주고 랜덤으로 포인트를 선택하여
         # x_left, x_right, y_left, y_right로 변환
         idx_list = []
@@ -292,11 +291,11 @@ class CURVEFit:
         for d in np.arange(0, self.x_range, self.dx):
 
             idx_full_list = np.where(np.logical_and(lane_pts[0, :]>=d, lane_pts[0, :]<d+0.1))[0].tolist()
-
+            
             idx_list += random.sample(idx_full_list, np.minimum(50, len(idx_full_list)))
-
+        
         lane_pts = lane_pts[:, idx_list]
-
+        
         x_g = np.copy(lane_pts[0, :])
         y_g = np.copy(lane_pts[1, :])
 
@@ -314,53 +313,102 @@ class CURVEFit:
 
         return x_left, y_left, x_right, y_right
 
-    def fit_curve(self, lane_pts):
+    def init_setting(self, lane_pts):
+        self._init_model()
+        self.x_left, self.y_left, self.x_right, self.y_right = self._init_preprocess_pts(lane_pts)
+
+    def preprocess_pts(self, lane_pts, y_pred_l, y_pred_r):
+        # recon_lane_pts에서 추출한 포인트들(차선인지 구분 안한 포인트들)을 일정 거리만큼 간격을 주고 랜덤으로 포인트를 선택하여
+        # x_left, x_right, y_left, y_right로 변환
+        idx_list = []
         
-        x_left, y_left, x_right, y_right = self.preprocess_pts(lane_pts)
+        for d in np.arange(0, self.x_range, self.dx):
 
-        # y포인트들(여기서 y값은 가로범위)이 갯수가 0 일경우 초기화
-        if len(y_left)==0 or len(y_right)==0:
-            print('y point does not exist')
-            self._init_model()
-            x_left, y_left, x_right, y_right = self.preprocess_pts(lane_pts)
+            idx_full_list = np.where(np.logical_and(lane_pts[0, :]>=d, lane_pts[0, :]<d+0.1))[0].tolist()
 
-        # 차선 폭이 너무 졻게 계산되면 자동으로 초기화
-        if self.lane_width < 0.01:
-            print("Too Short lane width")
-            self._init_model()
+            idx_list += random.sample(idx_full_list, np.minimum(50, len(idx_full_list)))
+
+        lane_pts = lane_pts[:, idx_list]
+
+        x_g = np.copy(lane_pts[0, :])
+        y_g = np.copy(lane_pts[1, :])
+
+        X_g = np.stack([x_g**i for i in reversed(range(1, self.order+1)) ]).T
+
+        y_right = y_g[np.logical_and(y_g>=y_pred_r-self.y_margin, y_g<y_pred_r+self.y_margin)]
+        x_right = x_g[np.logical_and(y_g>=y_pred_r-self.y_margin, y_g<y_pred_r+self.y_margin)]
+
+        y_left = y_g[np.logical_and(y_g>=y_pred_l-self.y_margin, y_g<y_pred_l+self.y_margin)]
+        x_left = x_g[np.logical_and(y_g>=y_pred_l-self.y_margin, y_g<y_pred_l+self.y_margin)]
+
+        return x_left, y_left, x_right, y_right
+
+    def fit_curve(self, lane_pts):     
+        self.not_left = False
+        self.not_right = False
         
-        X_left = np.stack([x_left**i for i in reversed(range(1, self.order+1))]).T
-        X_right = np.stack([x_right**i for i in reversed(range(1, self.order+1))]).T
+        X_left = np.stack([self.x_left**i for i in reversed(range(1, self.order+1))]).T
+        X_right = np.stack([self.x_right**i for i in reversed(range(1, self.order+1))]).T
 
-        if y_left.shape[0]>=self.ransac_left.min_samples:
-            self.ransac_left.fit(X_left, y_left)
+        if self.y_left.shape[0]>=self.ransac_left.min_samples:
+            self.ransac_left.fit(X_left, self.y_left)
 
-        if y_right.shape[0]>=self.ransac_right.min_samples:
-            self.ransac_right.fit(X_right, y_right)
+        if self.y_right.shape[0]>=self.ransac_right.min_samples:
+            self.ransac_right.fit(X_right, self.y_right)
 
         x_pred = np.arange(0, self.x_range, self.dx).astype(np.float32)
         X_pred = np.stack([x_pred**i for i in reversed(range(1, self.order+1))]).T
 
         y_pred_l = self.ransac_left.predict(X_pred)
         y_pred_r = self.ransac_right.predict(X_pred)
-
-        if y_left.shape[0]>=self.ransac_left.min_samples and y_right.shape[0]>=self.ransac_right.min_samples:
+        
+        if self.y_left.shape[0]>=self.ransac_left.min_samples and self.y_right.shape[0]>=self.ransac_right.min_samples:
+            # if self.lane_width < self.init_width - self.init_width/2:
+            #     # print("Too Short lane width")
+            #     self.lane_width = self.init_width
+            # else:
+            #     self.lane_width = np.mean(y_pred_l - y_pred_r)
             self.lane_width = np.mean(y_pred_l - y_pred_r)
 
-        if y_left.shape[0]<self.ransac_left.min_samples:
-            y_pred_l = y_pred_r + self.lane_width
-        
-        if y_right.shape[0]<self.ransac_right.min_samples:
-            y_pred_r = y_pred_l - self.lane_width
+        if y_pred_l.all() < 0:
+            self.not_left = True
+        else: self.not_left = False
+        if all(y_pred_l):
+            print(y_pred_r)
+            self.not_right = True
+        else: self.not_right = False
 
-        # 예측한 각 y값들의 거리 평균이 0.1보다 작을경우 차선을 강제로 분리
+        if self.y_left.shape[0]<self.ransac_left.min_samples:
+            y_pred_l = cp.deepcopy(y_pred_r + self.lane_width)
+        
+        if self.y_right.shape[0]<self.ransac_right.min_samples:
+            y_pred_r = cp.deepcopy(y_pred_l - self.lane_width)
+
+        # # 예측한 각 y값들의 거리 평균이 0.1보다 작을경우 차선을 강제로 분리
+        if1 , if2 = False, False
         if np.mean(np.abs(y_pred_l - y_pred_r)) <= 0.1:
+            if1 = True if y_pred_l.all() < 0 and y_pred_r.all() < 0 else False
+            if2 = True if y_pred_l.all() > 0 and y_pred_r.all() > 0 else False
             # 둘다 0보다 큰 값이면 차선이 왼쪽에 있다는 것
-            if y_pred_l[5] < 0 and y_pred_r < 0:
-                y_pred_l = y_pred_l + self.init_width
+            if if1:
+                y_pred_l = cp.deepcopy(y_pred_l + self.init_width)
+                self.lane_width = cp.deepcopy(self.init_width)
             # 둘다 0보다 작은 값이면 차선이 오른쪽에 있다는 것
-            if y_pred_l[5] > 0 and y_pred_r > 0:
-                y_pred_r = y_pred_r - self.init_width
+            if if2:
+                y_pred_r = cp.deepcopy(y_pred_r - self.init_width)
+                self.lane_width = cp.deepcopy(self.init_width)
+
+        # if self.not_left:
+        #     y_pred_l = cp.deepcopy(y_pred_r)
+        #     y_pred_r = y_pred_r - self.init_width
+        # elif self.not_right:
+        #     y_pred_r = cp.deepcopy(y_pred_l)
+        #     y_pred_l = y_pred_l + self.init_width
+
+        print("lane: {:.2f} | notleft: {:s} | notright: {:s}".format(self.lane_width, str(self.not_left), str(self.not_right)))
+        print("Over 0: {:s} | Under 0: {:s}".format(str(if1), str(if2)))
+
+        self.x_left, self.y_left, self.x_right, self.y_right = self._init_preprocess_pts(lane_pts)
 
         return x_pred, y_pred_l, y_pred_r
 

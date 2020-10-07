@@ -5,6 +5,7 @@ import rospy
 import numpy as np
 import cv2
 import math
+import copy as cp
 
 from std_msgs.msg import Float64, String
 from nav_msgs.msg import Path
@@ -17,7 +18,7 @@ import matplotlib.pyplot as plt
 
 def warp_image(img ,source_prop):
 
-    image_size = (img.shape[1], img.shape[0])
+    image_size = (img.shape[1], img.shape[0]) #shape[0]: Width shape[1]:Height
     x = img.shape[1]
     y = img.shape[0]
 
@@ -77,16 +78,18 @@ def rotationMtx(yaw, pitch, roll):
 
     return R
 
-def projectionMtx(params_cam):
+def projectionMtx(params_cam, val_fov=2):
     if params_cam["ENGINE"]=='UNITY':
-        fc_x = params_cam["HEIGHT"]/(2*np.tan(np.deg2rad(params_cam["FOV"]/2)))
-        fc_y = params_cam["HEIGHT"]/(2*np.tan(np.deg2rad(params_cam["FOV"]/2)))
+        fc_x = params_cam["HEIGHT"]/(2*np.tan(np.deg2rad(params_cam["FOV"]/val_fov)))
+        fc_y = params_cam["HEIGHT"]/(2*np.tan(np.deg2rad(params_cam["FOV"]/val_fov)))
     else:
-        fc_x = params_cam["WIDTH"]/2*(2*np.tan(np.deg2rad(params_cam["FOV"]/2)))
-        fc_y = params_cam["WIDTH"]/2*(2*np.tan(np.deg2rad(params_cam["FOV"]/2)))
+        fc_x = params_cam["WIDTH"]/(2*np.tan(np.deg2rad(params_cam["FOV"]/val_fov)))
+        fc_y = params_cam["WIDTH"]/(2*np.tan(np.deg2rad(params_cam["FOV"]/val_fov)))
 
-    cx = params_cam['WIDTH']/2
-    cy = params_cam["HEIGHT"]/2
+    # cx = params_cam['WIDTH']/2
+    # cy = params_cam["HEIGHT"]/2
+    cx = params_cam["HEIGHT"]/2
+    cy = params_cam['WIDTH']/2
 
     R_f = np.array([[fc_x, 0, cx],
                     [0, fc_y, cy]])
@@ -95,25 +98,27 @@ def projectionMtx(params_cam):
 
 class BEVTransform:
 
-    def __init__(self, params_cam, xb=1.0, zb=1.0):
+    def __init__(self, params_cam, xb=1.0, zb=1.0, cut_size=0.5, val_fov=2):
         self.xb = xb
         self.zb = zb
+        self.cut_size = cut_size
+        self.val_fov = val_fov
 
         self.theta = np.deg2rad(params_cam["PITCH"])
         self.width = params_cam["WIDTH"]
         self.height = params_cam["HEIGHT"]
 
         if params_cam["ENGINE"]=="UNITY":
-            self.alpha_r = np.deg2rad(params_cam["FOV"]/2)
+            self.alpha_r = np.deg2rad(params_cam["FOV"]/self.val_fov)
 
-            self.fc_y = params_cam["HEIGHT"]/(2*np.tan(np.deg2rad(params_cam["FOV"]/2)))
+            self.fc_y = params_cam["HEIGHT"]/(2*np.tan(np.deg2rad(params_cam["FOV"]/self.val_fov)))
             self.alpha_c = np.arctan2(params_cam["WIDTH"]/2, self.fc_y)
 
             self.fc_x = self.fc_y
         else:
-            self.alpha_r = np.deg2rad(params_cam["FOV"]/2)
+            self.alpha_r = np.deg2rad(params_cam["FOV"]/self.val_fov)
 
-            self.fc_y = params_cam["WIDTH"]/(2*np.tan(np.deg2rad(params_cam["FOV"]/2)))
+            self.fc_y = params_cam["WIDTH"]/(2*np.tan(np.deg2rad(params_cam["FOV"]/self.val_fov)))
             self.alpha_c = np.arctan2(params_cam["WIDTH"]/2, self.fc_y)
 
             self.fc_x = self.fc_y
@@ -136,7 +141,7 @@ class BEVTransform:
         return Xv, Yu
 
     def build_tf(self, params_cam):
-        v = np.array([params_cam["HEIGHT"]*0.5, params_cam["HEIGHT"]]).astype(np.float32)
+        v = np.array([params_cam["HEIGHT"]*self.cut_size, params_cam["HEIGHT"]]).astype(np.float32)
         u = np.array([0, params_cam["WIDTH"]]).astype(np.float32)
 
         U, V = np.meshgrid(u, v)
@@ -153,7 +158,7 @@ class BEVTransform:
 
         xc, yc, zc = xyz_bird[0, :].reshape([1, -1]), xyz_bird[1, :].reshape([1, -1]), xyz_bird[2, :].reshape([1, -1])
 
-        self.proj_mtx = projectionMtx(params_cam)
+        self.proj_mtx = projectionMtx(params_cam, val_fov=self.val_fov)
 
         xn, yn = xc/zc, yc/zc
 
@@ -165,6 +170,7 @@ class BEVTransform:
         dst_pts = xy1.astype(np.float32)
 
         self.perspective_tf = cv2.getPerspectiveTransform(src_pts, dst_pts)
+    
 
     def warp_bev_img(self, img):
         img_warp = cv2.warpPerspective(img, self.perspective_tf, (self.width, self.height), flags=cv2.INTER_LINEAR)
@@ -173,8 +179,8 @@ class BEVTransform:
 
     def recon_lane_pts(self, img):
         # cut_size만큼 위에서 이미지를 잘라서 포인트를 추출
-        cut_size = 0.5
-        img[:int(cut_size*self.height), :] = 0
+        img[:int(self.cut_size*self.height), :] = 0
+        self.cut_img = cp.deepcopy(img)
 
         if cv2.countNonZero(img) != 0:
             UV_mark = cv2.findNonZero(img).reshape([-1, 2])
@@ -260,13 +266,13 @@ class CURVEFit:
 
         self.ransac_left = linear_model.RANSACRegressor(base_estimator=linear_model.Ridge(alpha=2),
                                                         max_trials=5, 
-                                                        loss='absolute_loss',
+                                                        # loss='absolute_loss',
                                                         min_samples=self.min_pts, 
                                                         residual_threshold=0.4)
         
         self.ransac_right = linear_model.RANSACRegressor(base_estimator=linear_model.Ridge(alpha=2),
                                                         max_trials=5, 
-                                                        loss='absolute_loss',
+                                                        # loss='absolute_loss',
                                                         min_samples=self.min_pts, 
                                                         residual_threshold=0.4)
 
@@ -314,20 +320,28 @@ class CURVEFit:
 
         return x_left, y_left, x_right, y_right
 
-    def fit_curve(self, lane_pts):
-        
+    def fit_curve(self, lane_pts):     
+        self.not_left = False
+        self.not_right = False
+
         x_left, y_left, x_right, y_right = self.preprocess_pts(lane_pts)
 
         # y포인트들(여기서 y값은 가로범위)이 갯수가 0 일경우 초기화
-        if len(y_left)==0 or len(y_right)==0:
-            print('y point does not exist')
+        if len(y_left) <= 10 or len(y_right) <= 10:
+            if len(y_left) == 0:
+                # print('y_left point does not exist')
+                self.not_left = True
+            else:
+                # print("y_right point does not exist")
+                self.not_right = True
             self._init_model()
             x_left, y_left, x_right, y_right = self.preprocess_pts(lane_pts)
 
         # 차선 폭이 너무 졻게 계산되면 자동으로 초기화
         if self.lane_width < 0.01:
-            print("Too Short lane width")
+            # print("Too Short lane width")
             self._init_model()
+            x_left, y_left, x_right, y_right = self.preprocess_pts(lane_pts)
         
         X_left = np.stack([x_left**i for i in reversed(range(1, self.order+1))]).T
         X_right = np.stack([x_right**i for i in reversed(range(1, self.order+1))]).T
@@ -343,24 +357,51 @@ class CURVEFit:
 
         y_pred_l = self.ransac_left.predict(X_pred)
         y_pred_r = self.ransac_right.predict(X_pred)
-
+        
         if y_left.shape[0]>=self.ransac_left.min_samples and y_right.shape[0]>=self.ransac_right.min_samples:
+            # if self.lane_width < self.init_width - self.init_width/2:
+            #     # print("Too Short lane width")
+            #     self.lane_width = self.init_width
+            # else:
+            #     self.lane_width = np.mean(y_pred_l - y_pred_r)
             self.lane_width = np.mean(y_pred_l - y_pred_r)
 
         if y_left.shape[0]<self.ransac_left.min_samples:
-            y_pred_l = y_pred_r + self.lane_width
+            y_pred_l = cp.deepcopy(y_pred_r + self.lane_width)
         
         if y_right.shape[0]<self.ransac_right.min_samples:
-            y_pred_r = y_pred_l - self.lane_width
+            y_pred_r = cp.deepcopy(y_pred_l - self.lane_width)
 
-        # 예측한 각 y값들의 거리 평균이 0.1보다 작을경우 차선을 강제로 분리
+        # # 예측한 각 y값들의 거리 평균이 0.1보다 작을경우 차선을 강제로 분리
+        # if1 , if2 = False, False
+        # if np.mean(np.abs(y_pred_l - y_pred_r)) <= 0.1:
+        #     if1 = True if y_pred_l.all() < 0 and y_pred_r.all() < 0 else False
+        #     if2 = True if y_pred_l.all() > 0 and y_pred_r.all() > 0 else False
+        #     # 둘다 0보다 큰 값이면 차선이 왼쪽에 있다는 것
+        #     if if1:
+        #         y_pred_l = cp.deepcopy(y_pred_l + self.init_width)
+        #     # 둘다 0보다 작은 값이면 차선이 오른쪽에 있다는 것
+        #     if if2:
+        #         y_pred_r = cp.deepcopy(y_pred_r - self.init_width)
+
         if np.mean(np.abs(y_pred_l - y_pred_r)) <= 0.1:
             # 둘다 0보다 큰 값이면 차선이 왼쪽에 있다는 것
-            if y_pred_l[5] < 0 and y_pred_r < 0:
+            if y_pred_l[5] < 0 and y_pred_r[5] < 0:
                 y_pred_l = y_pred_l + self.init_width
             # 둘다 0보다 작은 값이면 차선이 오른쪽에 있다는 것
-            if y_pred_l[5] > 0 and y_pred_r > 0:
+            if y_pred_l[5] > 0 and y_pred_r[5] > 0:
                 y_pred_r = y_pred_r - self.init_width
+
+        # if self.not_left:
+        #     y_pred_l = cp.deepcopy(y_pred_r)
+        #     y_pred_r = y_pred_r - self.init_width
+        # elif self.not_right:
+        #     y_pred_r = cp.deepcopy(y_pred_l)
+        #     y_pred_l = y_pred_l + self.init_width
+
+        # print("lane: {:.2f} | notleft: {:s} | notright: {:s}".format(self.lane_width, str(self.not_left), str(self.not_right)))
+        print("lane: {:.2f}".format(self.lane_width))
+        # print("Over 0: {:s} | Under 0: {:s}".format(str(if1), str(if2)))
 
         return x_pred, y_pred_l, y_pred_r
 
@@ -387,9 +428,11 @@ def draw_lane_img(img, leftx, lefty, rightx, righty):
 
     point_np = cv2.cvtColor(np.copy(img), cv2.COLOR_GRAY2BGR)
 
+    #왼쪽: 파랑
     for ctr in zip(leftx, lefty):
         point_np = cv2.circle(point_np, ctr, 5, (255,0,0), -1)
 
+    #오른쪽: 빨강
     for ctr in zip(rightx, righty):
         point_np = cv2.circle(point_np, ctr, 5, (0,0,255), -1)
 
